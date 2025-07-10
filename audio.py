@@ -5,10 +5,10 @@ import base64
 from google import genai
 from google.genai import types
 import speech_recognition as sr
+from audio_recorder_streamlit import audio_recorder
 import tempfile
 import os
 from datetime import datetime
-import threading
 import time
 
 # Page configuration
@@ -161,28 +161,28 @@ def create_audio_player(audio_data, key=None, autoplay=True):
     """
     return audio_html
 
-def record_audio():
-    """Record audio from microphone"""
-    recognizer = sr.Recognizer()
-    microphone = sr.Microphone()
+def process_audio_bytes(audio_bytes):
+    """Process audio bytes and return speech recognition audio object"""
+    if audio_bytes is None:
+        return None
     
     try:
-        with microphone as source:
-            # Adjust for ambient noise
-            recognizer.adjust_for_ambient_noise(source, duration=1)
+        # Save audio bytes to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
+            temp_file.write(audio_bytes)
+            temp_file_path = temp_file.name
         
-        st.session_state.recording_status = "listening"
+        # Load audio file with speech recognition
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(temp_file_path) as source:
+            audio = recognizer.record(source)
         
-        with microphone as source:
-            # Record audio with timeout
-            audio = recognizer.listen(source, timeout=10, phrase_time_limit=30)
+        # Clean up temporary file
+        os.unlink(temp_file_path)
         
         return audio
-    except sr.WaitTimeoutError:
-        st.error("No speech detected. Please try again.")
-        return None
     except Exception as e:
-        st.error(f"Error recording audio: {str(e)}")
+        st.error(f"Error processing audio: {str(e)}")
         return None
 
 def transcribe_audio(audio_data):
@@ -310,76 +310,93 @@ def main_app():
     </div>
     """, unsafe_allow_html=True)
     
-    # Voice control buttons
-    col1, col2, col3 = st.columns([1, 2, 1])
+    # Audio recorder widget
+    st.markdown("#### 🎤 Click to Record Your Voice")
+    audio_bytes = audio_recorder(
+        text="Click to record",
+        recording_color="#ff0000",
+        neutral_color="#6aa36f",
+        icon_name="microphone",
+        icon_size="2x",
+        pause_threshold=2.0,
+        sample_rate=16000,
+        key="audio_recorder"
+    )
+    
+    # Process recorded audio
+    if audio_bytes:
+        st.session_state.recording_status = "processing"
+        
+        # Display audio player for user's recording
+        st.markdown("#### 🎧 Your Recording:")
+        st.audio(audio_bytes, format="audio/wav")
+        
+        # Process audio and get transcription
+        with st.spinner("🔄 Converting speech to text..."):
+            audio_data = process_audio_bytes(audio_bytes)
+            
+            if audio_data:
+                transcribed_text = transcribe_audio(audio_data)
+                
+                if transcribed_text:
+                    st.success(f"📝 Transcribed: \"{transcribed_text}\"")
+                    
+                    # Add user message
+                    st.session_state.messages.append({
+                        "role": "user", 
+                        "content": transcribed_text,
+                        "audio": audio_bytes,
+                        "timestamp": datetime.now().strftime("%H:%M:%S")
+                    })
+                    
+                    # Get AI response with voice
+                    st.session_state.recording_status = "responding"
+                    with st.spinner("🤖 AI is generating voice response..."):
+                        ai_response, ai_audio_data = get_ai_response_with_audio(transcribed_text, model_choice, api_key)
+                        
+                        if ai_response and ai_audio_data:
+                            wave_data = wave_file_from_bytes(ai_audio_data)
+                            st.session_state.messages.append({
+                                "role": "ai", 
+                                "content": ai_response,
+                                "audio": wave_data,
+                                "timestamp": datetime.now().strftime("%H:%M:%S")
+                            })
+                            
+                            # Play AI response immediately
+                            st.markdown("#### 🔊 AI Response:")
+                            audio_html = create_audio_player(wave_data, autoplay=True)
+                            st.markdown(audio_html, unsafe_allow_html=True)
+                    
+                    st.session_state.recording_status = "ready"
+                    time.sleep(2)  # Brief pause before allowing next recording
+                    st.rerun()
+    
+    # Quick actions
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔄 New Conversation"):
+            st.session_state.messages = []
+            st.session_state.recording_status = "ready"
+            st.rerun()
     
     with col2:
-        st.markdown('<div class="voice-controls">', unsafe_allow_html=True)
-        
-        # Record button
-        if st.button("🎤 Hold to Talk", key="record_btn", type="primary"):
-            st.session_state.recording_status = "listening"
-            st.rerun()
-        
-        # Quick actions
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("🔄 Start New Conversation"):
-                st.session_state.messages = []
-                st.session_state.recording_status = "ready"
-                st.rerun()
-        
-        with col_b:
-            if st.button("🎯 Try Sample"):
-                # Simulate voice input with sample text
-                sample_text = "Hello! Tell me something interesting about space exploration."
-                st.session_state.recording_status = "processing"
-                
-                # Add user message
-                st.session_state.messages.append({
-                    "role": "user", 
-                    "content": sample_text,
-                    "timestamp": datetime.now().strftime("%H:%M:%S")
-                })
-                
-                # Get AI response
-                with st.spinner("🤖 AI is thinking and generating voice response..."):
-                    ai_response, audio_data = get_ai_response_with_audio(sample_text, model_choice, api_key)
-                    
-                    if ai_response and audio_data:
-                        wave_data = wave_file_from_bytes(audio_data)
-                        st.session_state.messages.append({
-                            "role": "ai", 
-                            "content": ai_response,
-                            "audio": wave_data,
-                            "timestamp": datetime.now().strftime("%H:%M:%S")
-                        })
-                
-                st.session_state.recording_status = "ready"
-                st.rerun()
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Manual voice recording simulation (since real-time recording requires more complex setup)
-    if st.session_state.recording_status == "listening":
-        st.info("🎤 In a real implementation, this would capture your voice. For now, use the text input below as a placeholder.")
-        
-        # Placeholder for voice input
-        voice_text = st.text_input("Speak (or type your message):", key="voice_input")
-        
-        if st.button("✅ Send Voice Message") and voice_text:
+        if st.button("🎯 Try Sample"):
+            # Simulate voice input with sample text
+            sample_text = "Hello! Tell me something interesting about space exploration."
             st.session_state.recording_status = "processing"
             
             # Add user message
             st.session_state.messages.append({
                 "role": "user", 
-                "content": voice_text,
+                "content": sample_text,
                 "timestamp": datetime.now().strftime("%H:%M:%S")
             })
             
-            # Get AI response with voice
-            with st.spinner("🤖 AI is generating voice response..."):
-                ai_response, audio_data = get_ai_response_with_audio(voice_text, model_choice, api_key)
+            # Get AI response
+            with st.spinner("🤖 AI is thinking and generating voice response..."):
+                ai_response, audio_data = get_ai_response_with_audio(sample_text, model_choice, api_key)
                 
                 if ai_response and audio_data:
                     wave_data = wave_file_from_bytes(audio_data)
@@ -390,6 +407,11 @@ def main_app():
                         "timestamp": datetime.now().strftime("%H:%M:%S")
                     })
             
+            st.session_state.recording_status = "ready"
+            st.rerun()
+    
+    with col3:
+        if st.button("⏸️ Clear Status"):
             st.session_state.recording_status = "ready"
             st.rerun()
     
@@ -408,6 +430,12 @@ def main_app():
                     {message["content"]}
                 </div>
                 """, unsafe_allow_html=True)
+                
+                # Display user's audio if available
+                if "audio" in message:
+                    st.markdown("*Your voice recording:*")
+                    st.audio(message["audio"], format="audio/wav")
+                    
             else:
                 st.markdown(f"""
                 <div class="chat-message ai-message">
@@ -416,9 +444,10 @@ def main_app():
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Display audio player
+                # Display AI audio response
                 if "audio" in message:
-                    audio_html = create_audio_player(message["audio"], key=f"audio_{i}")
+                    st.markdown("*AI voice response:*")
+                    audio_html = create_audio_player(message["audio"], key=f"audio_{i}", autoplay=False)
                     st.markdown(audio_html, unsafe_allow_html=True)
     else:
         st.info("🎙️ Start a conversation by clicking 'Hold to Talk' above!")
@@ -427,11 +456,23 @@ def main_app():
     st.markdown("---")
     st.markdown("### 📋 How to Use")
     st.markdown("""
-    1. **🎤 Click 'Hold to Talk'** to start voice recording
-    2. **🗣️ Speak your message** clearly into your microphone
-    3. **🤖 AI responds** with both text and voice
-    4. **🔄 Continue** the conversation naturally
-    5. **🆕 Start fresh** with 'Start New Conversation'
+    1. **🎤 Click the microphone button** to start recording your voice
+    2. **🗣️ Speak clearly** into your microphone (stops automatically after pause)
+    3. **🔄 Processing** - Your speech is converted to text
+    4. **🤖 AI responds** with both text and voice automatically
+    5. **🔊 Listen** to the AI's voice response
+    6. **🔄 Continue** the conversation by recording again
+    7. **🆕 Start fresh** with 'New Conversation' button
+    """)
+    
+    # Technical info
+    st.markdown("### ⚙️ Technical Details")
+    st.markdown("""
+    - **🎙️ Audio Recording**: Uses `audio-recorder-streamlit` for browser-based recording
+    - **🔄 Speech-to-Text**: Google Speech Recognition API
+    - **🧠 AI Processing**: Google Gemini models
+    - **🔊 Text-to-Speech**: Google Gemini TTS with Fenrir voice
+    - **📱 Compatibility**: Works in modern web browsers with microphone access
     """)
     
     # Footer
