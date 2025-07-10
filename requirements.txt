@@ -1,0 +1,7 @@
+streamlit==1.39.0
+google-generativeai==0.8.3
+wave
+tempfile
+base64
+io
+os
